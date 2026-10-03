@@ -22,13 +22,13 @@ Testato su **Fiat Tipo 1.6 Multijet (2019), centralina Bosch EDC17C69**.
 - **Errori centralina**: lettura dei codici (ATTIVO / MEMORIZZATO / IN ATTESA / STORICO) con descrizione dei più comuni. Cancellazione con conferma, **solo a motore spento**, e verifica successiva.
 - **Controllo automatico errori** a ogni collegamento (riquadro `N ERRORI`, senza suono).
 - **Test guidato del sensore di pressione differenziale** (utile con P2002): minimo → 3000 giri in folle → motore spento. Il test riprende da solo se la scheda si riavvia (es. presa accendisigari che si spegne).
-- **Schermo automatico**: si spegne dopo 10 s, si riaccende al tocco. Resta acceso durante la rigenerazione e con intasamento ≥ 98%.
-- **Avvisi sonori** (buzzer opzionale): avvio, inizio rigenerazione, promemoria ogni 5 min, fine rigenerazione, intasamento 98%. Ogni suono si può disattivare dalla pagina **Suoni**.
+- **Schermo automatico**: dopo il collegamento all'adattatore resta acceso per il tempo scelto nella pagina Opzioni (10 s – 5 min, predefinito 1 min), poi si spegne dopo 10 s senza tocchi; si riaccende al tocco. Resta acceso durante la rigenerazione e con intasamento ≥ 98%.
+- **Avvisi sonori** (buzzer opzionale): avvio, inizio rigenerazione, promemoria ogni 5 min, fine rigenerazione, intasamento 98%. Ogni suono si può disattivare dalla pagina **Opzioni**.
 - **Log eventi** nella memoria interna (consultabile dal monitor seriale).
 
-| Errori centralina | Test sensore | Suoni |
+| Errori centralina | Test sensore | Opzioni |
 |---|---|---|
-| ![](docs/img/pagina_errori.png) | ![](docs/img/test_sensore.png) | ![](docs/img/pagina_suoni.png) |
+| ![](docs/img/pagina_errori.png) | ![](docs/img/test_sensore.png) | ![](docs/img/pagina_opzioni.png) |
 
 ## Hardware
 
@@ -65,15 +65,17 @@ All'inizio dello sketch, sezione `CONFIGURAZIONE - MODIFICA QUI`:
 | `SUONI_ATTIVI` | `true` | `false` = nessun suono |
 | `PROMEMORIA_RIGEN_MS` | 5 min | intervallo del promemoria durante la rigenerazione |
 | `SCHERMO_TIMEOUT_MS` | 10000 | spegnimento schermo |
+| `DURATA_RICERCA_S` | 15 | durata massima della ricerca dell'adattatore (si ferma appena lo trova) |
 | `SOGLIA_INTAS_SCHERMO` | 98 | % di intasamento oltre cui lo schermo resta acceso |
 
 ## Uso
 
-- **Navigazione**: Guida → *tocco* → Dettagli → *tocco* → Suoni → pulsante **Errori** → pagina Errori (Leggi / Cancella / Test / Esci).
+- **Navigazione**: Guida → *tocco* → Dettagli → *tocco* → Opzioni → pulsante **Errori** → pagina Errori (Leggi / Cancella / Test / Esci).
 - **Monitor seriale** (115200 baud):
   - `DUMP`: stampa il log eventi
   - `SUONI`: fa sentire tutti gli avvisi
   - `CANCELLA`: svuota il log
+  - `DIMENTICA`: dimentica l'adattatore scelto dalla lista
 
 ## Dati letti (PID)
 

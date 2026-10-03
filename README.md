@@ -22,13 +22,13 @@ Tested on **Fiat Tipo 1.6 Multijet (2019), Bosch EDC17C69 ECU**.
 - **ECU fault codes** (`Errori`): reads codes with their status (ACTIVE / STORED / PENDING / HISTORIC) and a description for the common ones. Codes can be cleared after confirmation, **only with the engine off**, and are read back to verify.
 - **Automatic fault check** on every connection, shown as an `N ERRORI` badge (no sound).
 - **Guided DPF differential pressure sensor test** (useful with P2002): idle → 3000 rpm in neutral → engine off. The test resumes on its own if the board reboots, for example when the cigarette-lighter socket loses power during cranking.
-- **Auto screen-off** after 10 s. It wakes on touch and stays on during a regeneration and when the soot load is ≥ 98%.
-- **Sound alerts** (optional buzzer): power-on, regeneration start, a reminder every 5 min, regeneration end, and 98% soot load. Each one can be switched off on the `Suoni` (Sounds) page.
+- **Auto screen-off** after 10 s (after connecting to the adapter it stays on for a time you choose on the Options page: 10 s – 5 min, default 1 min). It wakes on touch and stays on during a regeneration and when the soot load is ≥ 98%.
+- **Sound alerts** (optional buzzer): power-on, regeneration start, a reminder every 5 min, regeneration end, and 98% soot load. Each one can be switched off on the `Opzioni` (Options) page.
 - **Event log** in internal flash, readable from the serial monitor.
 
-| Fault codes | Sensor test | Sounds |
+| Fault codes | Sensor test | Options |
 |---|---|---|
-| ![](docs/img/pagina_errori.png) | ![](docs/img/test_sensore.png) | ![](docs/img/pagina_suoni.png) |
+| ![](docs/img/pagina_errori.png) | ![](docs/img/test_sensore.png) | ![](docs/img/pagina_opzioni.png) |
 
 ## Hardware
 
@@ -65,12 +65,13 @@ These settings are at the top of the sketch, in the section `CONFIGURAZIONE - MO
 | `SUONI_ATTIVI` | `true` | `false` = no sounds at all |
 | `PROMEMORIA_RIGEN_MS` | 5 min | reminder interval during a regeneration |
 | `SCHERMO_TIMEOUT_MS` | 10000 | time before the screen switches off |
+| `DURATA_RICERCA_S` | 15 | max adapter search time (stops as soon as it is found) |
 | `SOGLIA_INTAS_SCHERMO` | 98 | soot load % above which the screen stays on |
 
 ## Usage
 
-- **Navigation**: Main → *tap* → Details → *tap* → Sounds → **Errori** button → Fault codes page. That page has four buttons: Leggi = read, Cancella = clear, Test = sensor test, Esci = exit.
-- **Serial monitor** (115200 baud): `DUMP` prints the event log, `SUONI` plays every alert, `CANCELLA` clears the log.
+- **Navigation**: Main → *tap* → Details → *tap* → Options → **Errori** button → Fault codes page. That page has four buttons: Leggi = read, Cancella = clear, Test = sensor test, Esci = exit.
+- **Serial monitor** (115200 baud): `DUMP` prints the event log, `SUONI` plays every alert, `CANCELLA` clears the log, `DIMENTICA` forgets the adapter chosen from the list.
 
 ## PIDs
 
