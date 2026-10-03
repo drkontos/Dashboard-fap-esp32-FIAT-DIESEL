@@ -17,7 +17,8 @@
     - barra in alto: verde "Nessuna rigenerazione" oppure rossa lampeggiante
       "RIGENERAZIONE xx%" / "NON SPEGNERE!" con striscia di avanzamento
     - pagina Dettagli: tutti i valori con decimali + tempo medio di lettura
-    - pagina Suoni: attiva/disattiva ogni avviso sonoro (scelta salvata)
+    - pagina Opzioni: attiva/disattiva ogni avviso sonoro e sceglie quanto
+      resta acceso lo schermo dopo il collegamento (scelte salvate)
     - pagina Errori: legge i codici errore della centralina motore con stato
       (ATTIVO / MEMORIZZATO / IN ATTESA / STORICO) e li cancella a motore
       spento, con conferma e verifica
@@ -33,7 +34,7 @@
     - log eventi su memoria interna (LittleFS)
 
   NAVIGAZIONE
-    Guida -> tocco -> Dettagli -> tocco -> Suoni -> pulsante "Errori"
+    Guida -> tocco -> Dettagli -> tocco -> Opzioni -> pulsante "Errori"
 
   RIGENERAZIONE IN CORSO = avanzamento rigenerazione sopra 0,1%
 
@@ -50,6 +51,7 @@
     DUMP     -> stampa il log degli eventi
     SUONI    -> fa sentire tutti gli avvisi sonori in fila
     CANCELLA -> cancella il log
+    DIMENTICA -> dimentica l'adattatore scelto dalla lista
 
   Licenza MIT - vedi LICENSE
 */
@@ -132,6 +134,10 @@ const char* ELM_MAC_ADDRESS = "";
 
 const uint32_t BLE_PIN = 1234;
 
+// Ricerca dell'adattatore: dura AL MASSIMO questi secondi, ma si ferma appena
+// lo vede (di solito 1-3 s). Un adattatore appena "svegliato" puo' essere lento.
+const int DURATA_RICERCA_S = 15;
+
 //                                    DID     byte scala             offset     ogni(ms) nome
 const DefinizionePID DEF_PID[NUM_PID] = {
   /* P_AVANZ */ { "380B", 2, 100.0f / 65535.0f,  0.0f,      500,  "RIGEN_AVANZ" },
@@ -156,6 +162,10 @@ const unsigned long PROMEMORIA_RIGEN_MS = 5UL * 60UL * 1000UL;   // ogni 5 minut
 // Schermo: si spegne dopo questo tempo senza tocchi, e resta sempre acceso
 // durante una rigenerazione o con l'intasamento pari o sopra la soglia.
 const unsigned long SCHERMO_TIMEOUT_MS = 10000;
+// Appena collegato all'adattatore lo schermo resta acceso per un po':
+// la durata si sceglie dalla pagina Opzioni (10 s, 30 s, 1 min, 2 min, 5 min).
+const int SCHERMO_DOPO_COLLEGAMENTO_DEFAULT = 2;   // indice: 2 = 1 minuto
+unsigned long collegatoDaMs = 0;
 const float SOGLIA_INTAS_SCHERMO = 98.0f;
 #define PIN_RETROILLUMINAZIONE 21
 
@@ -236,6 +246,11 @@ const char* NOMI_SUONI[NUM_SUONI] = {
 };
 const char* CHIAVI_SUONI[NUM_SUONI] = { "sAvv", "sRIni", "sProm", "sRFin", "s98" };
 bool suonoAbilitato[NUM_SUONI] = { true, true, true, true, true };
+// opzione "schermo acceso dopo il collegamento"
+const int NUM_OPZ_SCHERMO = 5;
+const unsigned long OPZ_SCHERMO_MS[NUM_OPZ_SCHERMO] = { 10000, 30000, 60000, 120000, 300000 };
+const char* OPZ_SCHERMO_TESTO[NUM_OPZ_SCHERMO] = { "10 s", "30 s", "1 min", "2 min", "5 min" };
+int opzSchermo = SCHERMO_DOPO_COLLEGAMENTO_DEFAULT;
 Preferences prefSuoni;
 bool testDaRiprendere = false;   // riavvio avvenuto durante il test sensore
 bool schermoAcceso = true;
@@ -423,6 +438,11 @@ void gestisciSeriale() {
     stampaLogSuSeriale();
   } else if (riga.equalsIgnoreCase("SUONI")) {
     provaTuttiISuoni();
+  } else if (riga.equalsIgnoreCase("DIMENTICA")) {
+    macScelto = "";
+    memoriaPermanente.remove("mac");
+    scriviLog("ADATTATORE_DIMENTICATO,da_seriale");
+    Serial.println("Adattatore salvato dimenticato: al prossimo collegamento cerca di nuovo per nome/MAC.");
   } else if (riga.equalsIgnoreCase("CANCELLA")) {
     LittleFS.remove("/eventi_fap.csv");
     Serial.println("Log cancellato.");
@@ -451,7 +471,7 @@ void gestisciTocco() {
     } else if (pagina == 4) {
       toccoPaginaSuoni(px, py);
     } else {
-      pagina = (pagina == 0) ? 1 : 4;   // Guida -> Dettagli -> Suoni (-> Errori col pulsante)
+      pagina = (pagina == 0) ? 1 : 4;   // Guida -> Dettagli -> Opzioni (-> Errori col pulsante)
       paginaDaRidisegnare = true;
     }
     toccato = touch.tirqTouched() && touch.touched();   // dopo operazioni lunghe
@@ -475,41 +495,62 @@ void segnalaTentativoFallito() {
   }
 }
 
-BLEAdvertisedDevice* trovaAdattatore() {
-  disegnaMessaggio(String("Ricerca\n") + ELM_DEVICE_NAME + "...");
+// e' l'adattatore giusto? (MAC scelto dalla lista, MAC in configurazione o nome)
+bool eIlMioAdattatore(BLEAdvertisedDevice& dispositivo) {
+  String indirizzo = dispositivo.getAddress().toString().c_str();
+  indirizzo.toUpperCase();
+  if (macScelto.length() > 0 && indirizzo == macScelto) return true;
+  String macAtteso = String(ELM_MAC_ADDRESS);
+  macAtteso.toUpperCase();
+  if (macAtteso.length() > 0 && indirizzo == macAtteso) return true;
+  return dispositivo.haveName() &&
+         String(dispositivo.getName().c_str()) == String(ELM_DEVICE_NAME);
+}
 
-  BLEScan* scan = BLEDevice::getScan();
-  scan->setActiveScan(true);
-  BLEScanResults* risultati = scan->start(5, false);
+BLEAdvertisedDevice* adattatoreVisto = nullptr;
 
-  BLEAdvertisedDevice* trovato = nullptr;
-
-  for (int i = 0; i < risultati->getCount(); i++) {
-    BLEAdvertisedDevice dispositivo = risultati->getDevice(i);
-    String indirizzoTrovato = dispositivo.getAddress().toString().c_str();
-    indirizzoTrovato.toUpperCase();
-
-    if (macScelto.length() > 0 && indirizzoTrovato == macScelto) {
-      trovato = new BLEAdvertisedDevice(dispositivo);
-      break;
-    }
-
-    if (macScelto.length() == 0) {
-      String macAtteso = String(ELM_MAC_ADDRESS);
-      macAtteso.toUpperCase();
-      bool matchMac = (indirizzoTrovato == macAtteso);
-      bool matchNome = dispositivo.haveName() &&
-                        String(dispositivo.getName().c_str()) == String(ELM_DEVICE_NAME);
-      if (matchMac || matchNome) {
-        trovato = new BLEAdvertisedDevice(dispositivo);
-        break;
-      }
+// chiamata per ogni dispositivo Bluetooth visto durante la ricerca:
+// appena compare il nostro adattatore, la ricerca si ferma
+class CallbackRicerca : public BLEAdvertisedDeviceCallbacks {
+ public:
+  void onResult(BLEAdvertisedDevice dispositivo) override {
+    if (adattatoreVisto != nullptr) return;
+    if (eIlMioAdattatore(dispositivo)) {
+      adattatoreVisto = new BLEAdvertisedDevice(dispositivo);
+      BLEDevice::getScan()->stop();
     }
   }
+};
+CallbackRicerca callbackRicerca;
 
-  if (trovato != nullptr) {
+BLEAdvertisedDevice* trovaAdattatore() {
+  disegnaMessaggio(String("Ricerca ") + ELM_DEVICE_NAME + "...\n(tentativo " +
+                   String(tentativiFalliti + 1) + ", max " + String(DURATA_RICERCA_S) + " s)");
+
+  BLEScan* scan = BLEDevice::getScan();
+  scan->setAdvertisedDeviceCallbacks(&callbackRicerca);
+  scan->setActiveScan(true);
+  scan->setInterval(100);
+  scan->setWindow(99);
+  adattatoreVisto = nullptr;
+  unsigned long inizioRicerca = millis();
+  BLEScanResults* risultati = scan->start(DURATA_RICERCA_S, false);
+
+  if (adattatoreVisto != nullptr) {
+    scriviLog("ADATTATORE_TROVATO,dopo_ms=" + String(millis() - inizioRicerca));
     scan->clearResults();
-    return trovato;
+    return adattatoreVisto;
+  }
+
+  scriviLog("ADATTATORE_NON_VISTO,dispositivi_BLE=" + String(risultati->getCount()));
+
+  // Non visto: di solito l'adattatore dorme o e' occupato dal telefono, e
+  // la lista non servirebbe (bloccherebbe 30 s a ogni giro). La lista per
+  // scegliere a mano compare solo al 3o tentativo fallito, poi ogni 5.
+  bool mostraLista = (tentativiFalliti % 5 == 2);
+  if (!mostraLista) {
+    scan->clearResults();
+    return nullptr;
   }
 
   BLEAdvertisedDevice* scelto = scegliDaLista(risultati);
@@ -562,7 +603,7 @@ BLEAdvertisedDevice* scegliDaLista(BLEScanResults* risultati) {
   }
 
   unsigned long inizio = millis();
-  while (millis() - inizio < 20000) {
+  while (millis() - inizio < 30000) {
     if (touch.tirqTouched() && touch.touched()) {
       TS_Point p = touch.getPoint();
       int px = map(p.x, 300, 3800, 0, 320);
@@ -588,8 +629,12 @@ void connettiELM() {
   if (dispositivo == nullptr) {
     elmConnesso = false;
     scriviLog("CONNESSIONE_FALLITA,adattatore_non_trovato");
-    disegnaMessaggio("Adattatore non\ntrovato. Riprovo...");
     segnalaTentativoFallito();
+    if (tentativiFalliti >= 2) {
+      disegnaMessaggio("Adattatore non trovato.\n\n- quadro acceso?\n- telefono collegato\n  all'adattatore?\n  (spegni il suo BT)\nRiprovo...");
+    } else {
+      disegnaMessaggio("Adattatore non\ntrovato. Riprovo...");
+    }
     return;
   }
 
@@ -597,6 +642,8 @@ void connettiELM() {
     bleClient = BLEDevice::createClient();
   }
 
+  String indirizzoCollegato = dispositivo->getAddress().toString().c_str();
+  indirizzoCollegato.toUpperCase();
   bool connesso = bleClient->connect(dispositivo);
   delete dispositivo;
 
@@ -636,8 +683,23 @@ void connettiELM() {
   }
 
   elmConnesso = true;
-  scriviLog("CONNESSO," + macScelto);
-  inizializzaELM();
+  collegatoDaMs = millis();
+  scriviLog("CONNESSO," + indirizzoCollegato);
+  if (!inizializzaELM()) {
+    // collegato via Bluetooth ma non risponde ai comandi OBD: non e' un
+    // adattatore ELM327 (es. scelto per sbaglio dalla lista). Lo dimentico.
+    scriviLog("ADATTATORE_NON_RISPONDE,dimenticato," + indirizzoCollegato);
+    disegnaMessaggio("Questo dispositivo\nnon risponde come\nadattatore OBD:\nlo dimentico.\n\nRiprovo...");
+    if (macScelto.length() > 0) {
+      macScelto = "";
+      memoriaPermanente.remove("mac");
+    }
+    bleClient->disconnect();
+    elmConnesso = false;
+    segnalaTentativoFallito();
+    delay(2000);
+    return;
+  }
 }
 
 BLERemoteCharacteristic* trovaCaratteristicaAutomatica(BLEClient* client) {
@@ -663,14 +725,18 @@ BLERemoteCharacteristic* trovaCaratteristicaAutomatica(BLEClient* client) {
 // DIALOGO CON L'ADATTATORE ELM327
 // ============================================================================
 
-void inizializzaELM() {
-  inviaComandoELM("ATZ", 2000);    delay(1000);
+// restituisce false se dall'altra parte non risponde nessun ELM327
+bool inizializzaELM() {
+  String rispZ = inviaComandoELM("ATZ", 2000);    delay(1000);
   inviaComandoELM("ATE0", 1000);   delay(100);
   inviaComandoELM("ATL0", 1000);   delay(100);
   inviaComandoELM("ATS0", 1000);   delay(100);   // niente spazi: risposte piu' corte
   // Protocollo 7 (CAN 29 bit 500k); la "A" = se non va, ricerca automatica
   String rispSP = inviaComandoELM("ATSPA7", 1000);
   scriviLog("AT_SETUP,ATSPA7," + pulisci(rispSP));
+  rispZ.trim();
+  rispSP.trim();
+  return rispZ.length() > 0 || rispSP.length() > 0;
 }
 
 // Invia un comando e aspetta il ">" finale. Se "atteso" non e' vuoto, scarta
@@ -2317,7 +2383,8 @@ bool schermoForzatoAcceso() {
 }
 
 void gestisciSchermo() {
-  bool forzato = elmConnesso && schermoForzatoAcceso();
+  bool appenaCollegato = elmConnesso && millis() - collegatoDaMs < OPZ_SCHERMO_MS[opzSchermo];
+  bool forzato = !elmConnesso || appenaCollegato || schermoForzatoAcceso();   // acceso anche mentre cerca l'adattatore
   if (forzato) {
     if (!eraForzatoAcceso && (rigenInCorso || intasamentoAlto) && (pagina == 1 || pagina == 4 || (pagina == 2 && statoPaginaErrori != ERR_CONFERMA))) {
       pagina = 0;                     // appena parte l'avviso, mostra la pagina principale
@@ -2339,13 +2406,16 @@ void gestisciSchermo() {
 // PAGINA SUONI (impostazioni)
 // ============================================================================
 
-const int SUONI_Y0 = 40, SUONI_RIGA_H = 30;
+const int SUONI_Y0 = 40, SUONI_RIGA_H = 25;
+const int NUM_RIGHE_OPZIONI = NUM_SUONI + 1;   // 5 suoni + schermo
 
 void caricaImpostazioniSuoni() {
   prefSuoni.begin("dpfsuoni", false);
   for (int i = 0; i < NUM_SUONI; i++) {
     suonoAbilitato[i] = prefSuoni.getBool(CHIAVI_SUONI[i], true);
   }
+  opzSchermo = prefSuoni.getUChar("scrColl", SCHERMO_DOPO_COLLEGAMENTO_DEFAULT);
+  if (opzSchermo < 0 || opzSchermo >= NUM_OPZ_SCHERMO) opzSchermo = SCHERMO_DOPO_COLLEGAMENTO_DEFAULT;
 }
 
 void disegnaRigaSuono(int i) {
@@ -2354,14 +2424,22 @@ void disegnaRigaSuono(int i) {
   tft.setTextPadding(0);
   tft.setTextColor(C_TEXT, C_BG);
   tft.setTextDatum(ML_DATUM);
+  if (i == NUM_SUONI) {                 // ultima riga: schermo dopo il collegamento
+    tft.drawString("Schermo acceso al collegam.", 12, y + SUONI_RIGA_H / 2, 2);
+    tft.fillRoundRect(244, y + 3, 64, 19, 9, C_TILE);
+    tft.setTextColor(C_TEXT, C_TILE);
+    tft.setTextDatum(MC_DATUM);
+    tft.drawString(OPZ_SCHERMO_TESTO[opzSchermo], 276, y + SUONI_RIGA_H / 2, 2);
+    return;
+  }
   tft.drawString(NOMI_SUONI[i], 12, y + SUONI_RIGA_H / 2, 2);
   bool on = suonoAbilitato[i];
   uint16_t sfondo = on ? C_GREEN : C_BARBG;
-  tft.fillRoundRect(252, y + 5, 56, 20, 10, sfondo);
+  tft.fillRoundRect(252, y + 3, 56, 19, 9, sfondo);
   tft.setTextColor(on ? C_BG : C_TEXT, sfondo);
   tft.setTextDatum(MC_DATUM);
   tft.drawString(on ? "SI" : "NO", 280, y + SUONI_RIGA_H / 2, 2);
-  if (i < NUM_SUONI - 1) tft.drawFastHLine(12, y + SUONI_RIGA_H - 1, 296, C_TILE);
+  tft.drawFastHLine(12, y + SUONI_RIGA_H - 1, 296, C_TILE);
 }
 
 void disegnaPaginaSuoni() {
@@ -2370,11 +2448,11 @@ void disegnaPaginaSuoni() {
   tft.setTextPadding(0);
   tft.setTextColor(C_TEXT, C_TILE);
   tft.setTextDatum(ML_DATUM);
-  tft.drawString("Suoni", 12, BAR_H / 2, 4);
+  tft.drawString("Opzioni", 12, BAR_H / 2, 4);
   tft.setTextColor(C_LABEL, C_TILE);
   tft.setTextDatum(MR_DATUM);
   tft.drawString("tocca una riga per cambiare", 308, BAR_H / 2, 2);
-  for (int i = 0; i < NUM_SUONI; i++) disegnaRigaSuono(i);
+  for (int i = 0; i < NUM_RIGHE_OPZIONI; i++) disegnaRigaSuono(i);
   disegnaPulsante(4, PULS_Y, 150, PULS_H, "Errori", C_TILE, C_TEXT);
   disegnaPulsante(166, PULS_Y, 150, PULS_H, "Esci", C_TILE, C_TEXT);
 }
@@ -2392,7 +2470,14 @@ void toccoPaginaSuoni(int px, int py) {
   }
   if (py < SUONI_Y0) return;
   int i = (py - SUONI_Y0) / SUONI_RIGA_H;
-  if (i < 0 || i >= NUM_SUONI) return;
+  if (i < 0 || i >= NUM_RIGHE_OPZIONI) return;
+  if (i == NUM_SUONI) {                 // schermo dopo il collegamento: valore successivo
+    opzSchermo = (opzSchermo + 1) % NUM_OPZ_SCHERMO;
+    prefSuoni.putUChar("scrColl", opzSchermo);
+    scriviLog(String("IMPOSTAZIONE_SCHERMO_COLLEGAMENTO,") + OPZ_SCHERMO_TESTO[opzSchermo]);
+    disegnaRigaSuono(i);
+    return;
+  }
   suonoAbilitato[i] = !suonoAbilitato[i];
   prefSuoni.putBool(CHIAVI_SUONI[i], suonoAbilitato[i]);
   scriviLog(String("IMPOSTAZIONE_SUONO,") + CHIAVI_SUONI[i] + "=" + (suonoAbilitato[i] ? "SI" : "NO"));
@@ -2418,7 +2503,11 @@ void disegnaMessaggio(String msg) {
   tft.setTextPadding(0);
   tft.setTextColor(COL_LABEL, COL_BG);
   tft.setTextSize(2);
-  tft.setCursor(10, 110);
+  int righe = 1;
+  for (unsigned int i = 0; i < msg.length(); i++) if (msg.charAt(i) == '\n') righe++;
+  int y = 120 - righe * 9;
+  if (y < 8) y = 8;
+  tft.setCursor(10, y);
   tft.println(msg);
   tft.setTextSize(1);
   paginaDaRidisegnare = true;   // la dashboard andra' ridisegnata da capo
