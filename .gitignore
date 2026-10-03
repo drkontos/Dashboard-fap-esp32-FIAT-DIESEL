@@ -1,0 +1,12 @@
+   # log e dump personali
+   *.csv
+   *.log
+   dump*.txt
+   # file di compilazione
+   build/
+   *.bin
+   *.elf
+   *.map
+   .vscode/
+   .DS_Store
+   Thumbs.db
